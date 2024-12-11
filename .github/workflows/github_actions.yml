@@ -112,7 +112,7 @@ jobs:
     - name: Update task-definition image
       run: |
         echo "IMAGE_TAG=${{ github.run_number }}" >> $GITHUB_ENV
-        sed -i 's|"image": *".*buddy-ecr-repo-2024:[^"]*"|"image": "${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/buddy-ecr-repo-2024121111:${{ github.run_number }}"|g' ./task-definition.json
+        sed -i 's|"image": *".*buddy-ecr-repo-2024:[^"]*"|"image": "${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/buddy-ecr-repo-2024:${{ github.run_number }}"|g' ./task-definition.json
         cat ./task-definition.json
         git config --local user.name "Abir-K"
         git config --local user.email "abirbeatz@gmail.com"
