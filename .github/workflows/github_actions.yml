@@ -105,18 +105,20 @@ jobs:
         task-definition: ./task-definition.json
         container-name: app-container
         image: ${{ steps.build-image.outputs.image }}
+      env:
+        AWS_REGION: ${{ secrets.AWS_REGION }}
+        AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+
+    - name: Update task-definition image
       run: |
         echo "IMAGE_TAG=${{ github.run_number }}" >> $GITHUB_ENV
-        sed -i "s|image: .*buddy-ecr-repo-2024121110:.*|image: $image ./task-definition.json
+        sed -i "s|image: .*buddy-ecr-repo-2024121110:.*|image: ${{ steps.build-image.outputs.image }} ./task-definition.json
         cat ./task-definition.json
         git config --local user.name "Abir-K"
         git config --local user.email "abirbeatz@gmail.com"
         git add ./task-definition.json
         git commit -m "Update image tag to ${{ env.IMAGE_TAG }}"
         git push https://${{ secrets.CHILD_REPO_TOKEN }}@github.com/Abir-K/ECS_temp
-      env:
-        AWS_REGION: ${{ secrets.AWS_REGION }}
-        AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
 
     - name: Debug task definition file
       run: |
