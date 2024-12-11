@@ -5,7 +5,7 @@
     "containerDefinitions": [
       {
         "name": "app-container",
-        "image": "699475925713.dkr.ecr.ap-south-1.amazonaws.com/buddy-ecr-repo-2024:17",
+        "image": "699475925713.dkr.ecr.ap-south-1.amazonaws.com/buddy-ecr-repo-2024:19",
         "memory": 512,
         "cpu": 256,
         "essential": true,
