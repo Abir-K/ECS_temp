@@ -1,0 +1,199 @@
+name: Create and Sync Private Child Repo
+on:
+  push:
+    branches:
+    - main
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  GH_TOKEN: ${{ secrets.CHILD_REPO_TOKEN }}
+  SERVICE_NAME: "dev-12"
+  CLUSTER_NAME: "devtwelvecluster"
+
+jobs:
+  create-and-sync-private-child-repo:
+    runs-on: ubuntu-latest
+    steps:
+    # Step 1: Set up GitHub Authentication
+    - name: Set up GitHub authentication
+      run: |
+        git config --global user.name "developer.twelve"
+        git config --global user.email "developer.twelve@neutrix.co"
+
+    # Step 2: Create a New Private Child Repository
+    - name: Create a new private child repository
+      id: create_repo
+      run: |
+        NEW_REPO_NAME="buddy-child-repo-$(date +%Y%m%d%H)"
+        echo "NEW_REPO_NAME=$NEW_REPO_NAME" >> $GITHUB_ENV
+
+        curl -H "Authorization: token $GH_TOKEN" \
+             -H "Accept: application/vnd.github.v3+json" \
+             -d "{\"name\": \"$NEW_REPO_NAME\", \"private\": true}" \
+             https://api.github.com/user/repos
+        echo "Created private repository: $NEW_REPO_NAME"
+
+    # Step 3: Configure AWS Credential
+    - name: Configure AWS credentials
+      run: |
+        aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws configure set default.region $AWS_REGION
+
+    # Step 4: Check and create Amazon ECR repository
+    - name: Check and create Amazon ECR repository
+      id: create_ecr
+      run: |
+        ECR_REPO_NAME="buddy-ecr-repo-$(date +%Y%m%d%H)"
+        echo "ECR_REPO_NAME=$ECR_REPO_NAME" >> $GITHUB_ENV
+        if aws ecr describe-repositories --repository-names $ECR_REPO_NAME > /dev/null 2>&1; then
+          echo "ECR repository $ECR_REPO_NAME already exists."
+        else
+          aws ecr create-repository --repository-name $ECR_REPO_NAME
+          echo "Created ECR repository: $ECR_REPO_NAME"
+        fi
+
+    # Step 5: Checkout the Code
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    # Step 6: Log in to Amazon ECR
+    - name: Log in to Amazon ECR
+      run: |
+        aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+    # Step 7: Build and Push Docker Image
+    - name: Build and push Docker image
+      id: build-image
+      env:
+        REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+        REPO: ${{ env.ECR_REPO_NAME }}
+      run: |
+        REPO_LOWER=$(echo "${REPO}" | tr '[:upper:]' '[:lower:]')
+        REPOSITORY_TAG="${REGISTRY}/${REPO_LOWER}:${GITHUB_RUN_NUMBER}"
+        echo "Docker tag: ${REPOSITORY_TAG}"
+        docker build -t "${REPO_LOWER}" .
+        docker tag "${REPO_LOWER}:latest" "${REPOSITORY_TAG}"
+        docker push "${REPOSITORY_TAG}"
+        echo "image=${REPOSITORY_TAG}" >> $GITHUB_OUTPUT
+
+    # Step 9: Create ECS Fargate Cluster
+    - name: Create ECS Fargate Cluster
+      id: create-fargatecluster
+      run: |
+        CLUSTER_NAME=$CLUSTER_NAME
+        EXISTING_CLUSTER=$(aws ecs describe-clusters --clusters $CLUSTER_NAME --query "clusters[0].status" --output text)
+
+        if [[ "$EXISTING_CLUSTER" == "ACTIVE" ]]; then
+          echo "ECS Fargate Cluster $CLUSTER_NAME already exists."
+        else
+          aws ecs create-cluster --cluster-name $CLUSTER_NAME
+          echo "Created ECS Fargate Cluster: $CLUSTER_NAME" >> $GITHUB_ENV
+        fi
+
+    - name: Debug ECS Service Creation Inputs
+      run: |
+        echo "Cluster Name: $CLUSTER_NAME"
+        echo "Service Name: $SERVICE_NAME"
+
+    # Step 10: Fill in the new image ID in the Amazon ECS task definition
+    - name: Fill in the new image ID in the Amazon ECS task definition
+      id: task-def
+      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      with:
+        task-definition: ./task-definition.json
+        container-name: app-container
+        image: ${{ steps.build-image.outputs.image }}
+      env:
+        AWS_REGION: ${{ secrets.AWS_REGION }}
+        AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+
+    - name: Debug task definition file
+      run: |
+        cat ./task-definition.json
+        echo "Image used: ${{ steps.build-image.outputs.image }}"
+
+    # Step 11: Update ECS Service with the new task definition and deploy
+    - name: Create or Update ECS Service and Associate Load Balancer
+      run: |
+        set -e
+
+        LOAD_BALANCER_NAME="${SERVICE_NAME}-alb"
+
+        echo "Registering ECS Task Definition..."
+        TASK_DEFINITION_ARN=$(aws ecs register-task-definition \
+          --cli-input-json file://task-definition.json \
+          --region "$AWS_REGION" \
+          --query "taskDefinition.taskDefinitionArn" \
+          --output text)
+
+        echo "Task Definition Registered: $TASK_DEFINITION_ARN"
+
+        echo "Creating Application Load Balancer..."
+        LOAD_BALANCER_ARN=$(aws elbv2 create-load-balancer \
+          --name "$LOAD_BALANCER_NAME" \
+          --subnets subnet-07ae087fb75604240 subnet-0aa0460d840b2bba1 \
+          --security-groups sg-081b319722ab63bba \
+          --scheme internet-facing \
+          --type application \
+          --region "$AWS_REGION" \
+          --query "LoadBalancers[0].LoadBalancerArn" \
+          --output text)
+
+        echo "Load Balancer Created: $LOAD_BALANCER_ARN"
+
+        TG_NAME="buddy-ecs-tg"
+        VPC_ID="vpc-06248673c78e089bc"
+
+        EXISTING_TG_ARN=$(aws elbv2 describe-target-groups --names $TG_NAME --query "TargetGroups[0].TargetGroupArn" --output text 2>/dev/null || echo "")
+        if [ -z "$EXISTING_TG_ARN" ]; then
+          TG_ARN=$(aws elbv2 create-target-group \
+            --name $TG_NAME \
+            --protocol HTTP \
+            --port 80 \
+            --vpc-id $VPC_ID \
+            --target-type ip \
+            --query "TargetGroups[0].TargetGroupArn" \
+            --output text)
+        else
+          TG_ARN=$EXISTING_TG_ARN
+        fi
+
+        echo "TARGET_GROUP_ARN=$TG_ARN" >> $GITHUB_ENV
+        echo "VPC_ID=$VPC_ID" >> $GITHUB_ENV
+
+        aws elbv2 create-listener \
+          --load-balancer-arn "$LOAD_BALANCER_ARN" \
+          --protocol HTTP \
+          --port 80 \
+          --default-actions Type=forward,TargetGroupArn=$TG_ARN \
+          --region "$AWS_REGION"
+
+        SERVICE_EXISTS=$(aws ecs describe-services \
+          --cluster "$CLUSTER_NAME" \
+          --services "$SERVICE_NAME" \
+          --region "$AWS_REGION" \
+          --query "services[0].serviceName" \
+          --output text)
+
+        if [ "$SERVICE_EXISTS" != "None" ]; then
+          aws ecs update-service \
+            --cluster "$CLUSTER_NAME" \
+            --service "$SERVICE_NAME" \
+            --task-definition "$TASK_DEFINITION_ARN" \
+            --load-balancers "targetGroupArn=$TG_ARN,containerName=app-container,containerPort=80" \
+            --desired-count 1 \
+            --region "$AWS_REGION" \
+            --force-new-deployment
+        else
+          aws ecs create-service \
+            --region "$AWS_REGION" \
+            --cluster "$CLUSTER_NAME" \
+            --service-name "$SERVICE_NAME" \
+            --task-definition "$TASK_DEFINITION_ARN" \
+            --desired-count 1 \
+            --launch-type FARGATE \
+            --load-balancers "targetGroupArn=$TG_ARN,containerName=app-container,containerPort=80" \
+            --network-configuration "awsvpcConfiguration={subnets=[subnet-07ae087fb75604240,subnet-0aa0460d840b2bba1],assignPublicIp=ENABLED}" \
+            --region "$AWS_REGION"
+        fi

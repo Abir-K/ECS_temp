@@ -1,0 +1,22 @@
+{
+    "family": "my-task-definition",
+    "executionRoleArn": "arn:aws:iam::699475925713:role/ecsTaskExecutionRole",
+    "networkMode": "awsvpc",
+    "containerDefinitions": [
+      {
+        "name": "app-container",
+        "image": "699475925713.dkr.ecr.us-east-1.amazonaws.com/buddy-ecr-repo-2024121106:1",
+        "memory": 512,
+        "cpu": 256,
+        "essential": true,
+        "portMappings": [
+          {
+            "containerPort": 80,
+            "hostPort": 80,
+            "protocol": "tcp"
+          }
+        ]
+      }
+    ]
+  }
+  
