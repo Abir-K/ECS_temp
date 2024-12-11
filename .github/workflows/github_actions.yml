@@ -88,7 +88,8 @@ jobs:
           echo "ECS Fargate Cluster $CLUSTER_NAME already exists."
         else
           aws ecs create-cluster --cluster-name $CLUSTER_NAME
-          echo "Created ECS Fargate Cluster: $CLUSTER_NAME" >> $GITHUB_ENV
+          echo "ECS_CLUSTER=$CLUSTER_NAME" >> $GITHUB_ENV
+          echo "Created ECS Fargate Cluster: $CLUSTER_NAME"
         fi
 
     - name: Debug ECS Service Creation Inputs
